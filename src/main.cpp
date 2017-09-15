@@ -8,7 +8,8 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
-#include "spline.h"
+#include "utils/spline.h"
+#include "utils/coordinate_transforms.h"
 
 using namespace std;
 
@@ -198,7 +199,7 @@ int main() {
   }
 
   int lane = 1;
-  double ref_vel = 30.0;
+  double ref_vel = 50; // km/h
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,
                &map_waypoints_s,&map_waypoints_dx,
@@ -240,23 +241,90 @@ int main() {
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
-            int prev_path_size = previous_path_x.size();
+            int prev_size = previous_path_x.size();
           	json msgJson;
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+            vector<double> anchor_x;
+            vector<double> anchor_y;
 
+            double ref_x = car_x;
+            double ref_y = car_y;
+            // double ref_yaw = deg2rad(car_yaw);
+            double ref_yaw = car_yaw;
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-            double dist_inc = 0.2;
-            for(int i = 0; i < 50; i++) {
-              double next_s = car_s + (i + 1) * dist_inc;
-              double next_d = 6.0;
-              vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-              next_x_vals.push_back(xy[0]);
-              next_y_vals.push_back(xy[1]);
+            if(prev_size < 2) {
+              // create points tangent to the car
+              double prev_car_x = car_x - cos(car_yaw);
+              double prev_car_y = car_y - sin(car_yaw);
+
+              anchor_x.push_back(prev_car_x);
+              anchor_x.push_back(car_x);
+
+              anchor_y.push_back(prev_car_y);
+              anchor_y.push_back(car_y);
+
             }
-            // END
+            else {
+              // use previous path points as reference
+              // using the current car_x, car_y, car_yaw would not be as smooth
+              ref_x = previous_path_x[prev_size - 1];
+              ref_y = previous_path_y[prev_size - 1];
+
+              double prev_car_x = previous_path_x[prev_size - 2];
+              double prev_car_y = previous_path_y[prev_size - 2];
+              ref_yaw = atan2(ref_y - prev_car_y, ref_x - prev_car_x);
+
+             anchor_x.push_back(prev_car_x);
+             anchor_x.push_back(ref_x);
+
+             anchor_y.push_back(prev_car_y);
+             anchor_y.push_back(ref_y);
+            }
+
+            // create evenly spaced points in frenet coords - every 30m
+            double lane_d = (2.0 + 4.0 * (double) lane); // center of the lane we want
+            for(int i = 1; i < 4; i++) {
+              vector<double> anchor_xy = getXY(car_s + 30.0 * i, lane_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              anchor_x.push_back(anchor_xy[0]);
+              anchor_y.push_back(anchor_xy[1]);
+            }
+            globalToVehicle(&anchor_x, &anchor_y, ref_x, ref_y, ref_yaw);
+
+            tk::spline s;
+            s.set_points(anchor_x, anchor_y);
+
+            // create points from spline in vehicle coordinates
+            vector<double> spline_x;
+            vector<double> spline_y;
+            double target_x = 30.0;
+            double target_y = s(target_x);
+            double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
+            double x_point = 0.0;
+            for(int i = 0; i < 50 - prev_size; i++) {
+              double N = target_dist / (0.02 * ref_vel / 3.6);
+              x_point += target_x / N;
+              double y_point = s(x_point);
+
+              spline_x.push_back(x_point);
+              spline_y.push_back(y_point);
+            }
+
+            vehicleToGlobal(&spline_x, &spline_y, ref_x, ref_y, ref_yaw);
+            vector<double> next_x_vals;
+            vector<double> next_y_vals;
+
+            // add previous points
+            for(int i = 0; i < prev_size; i++) {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+            }
+
+            // add points from spline
+            for(int i = 0; i < 50 - prev_size; i++) {
+              next_x_vals.push_back(spline_x[i]);
+              next_y_vals.push_back(spline_y[i]);
+            }
+
             msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 

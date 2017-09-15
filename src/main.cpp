@@ -161,6 +161,52 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
+// returns the index (in sensor_fusion) of the occuping vehicle
+// -1 if no vehicle
+int isForwardLaneOccupied(const vector<vector<double>>& sensor_fusion,
+                           double car_s,
+                           int lane) {
+  double lane_center = 2.0 + (double)lane * 4.0;
+  for(size_t i = 0; i < sensor_fusion.size(); i++) {
+    float d = sensor_fusion[i][6];
+    if(d < (lane_center + 2.0) && d > (lane_center - 2)) {
+      double vx = sensor_fusion[i][3];
+      double vy = sensor_fusion[i][4];
+      double v_mag = sqrt(vx * vx + vy * vy);
+      double check_car_s = sensor_fusion[i][5];
+
+      check_car_s += 0.02 * v_mag;
+      if(check_car_s > car_s && (check_car_s - car_s) < 20) {
+        return (int)i;
+      }
+    }
+  }
+  return -1;
+}
+
+// returns the index (in sensor_fusion) of the occuping vehicle
+// -1 if no vehicle
+int isBackwardLaneOccupied(const vector<vector<double>>& sensor_fusion,
+                           double car_s,
+                           int lane) {
+  double lane_center = 2.0 + (double)lane * 4.0;
+  for(size_t i = 0; i < sensor_fusion.size(); i++) {
+    float d = sensor_fusion[i][6];
+    if(d < (lane_center + 2.0) && d > (lane_center - 2)) {
+      double vx = sensor_fusion[i][3];
+      double vy = sensor_fusion[i][4];
+      double v_mag = sqrt(vx * vx + vy * vy);
+      double check_car_s = sensor_fusion[i][5];
+
+      check_car_s += 0.02 * v_mag;
+      if(check_car_s < car_s && (car_s - check_car_s) < 20) {
+        return (int)i;
+      }
+    }
+  }
+  return -1;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -175,6 +221,15 @@ int main() {
   string map_file_ = "../data/highway_map.csv";
   // The max s value before wrapping around the track back to 0
   double max_s = 6945.554;
+
+  enum class State {
+    Ready,
+    KeepLane,
+    PrepareChangeLeft,
+    PrepareChangeRight,
+    ChangeLaneLeft,
+    ChangeLaneRight,
+  };
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
@@ -199,13 +254,14 @@ int main() {
   }
 
   int lane = 1;
-  double ref_vel = 50; // km/h
-
+  double ref_vel = 0.0; // km/h
+  State state = State::Ready;
   h.onMessage([&map_waypoints_x,&map_waypoints_y,
                &map_waypoints_s,&map_waypoints_dx,
                &map_waypoints_dy,
                &lane,
-               &ref_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+               &ref_vel,
+               &state](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -240,9 +296,130 @@ int main() {
           	double end_path_d = j[1]["end_path_d"];
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
-          	auto sensor_fusion = j[1]["sensor_fusion"];
+            // format: [car_id, x, y, vx, vy, s, d]
+            vector<vector<double>> sensor_fusion = j[1]["sensor_fusion"];
             int prev_size = previous_path_x.size();
-          	json msgJson;
+            double ego_lane_center = 2.0 + (double)lane * 4.0;
+            if(prev_size > 0) {
+              car_s = end_path_s;
+            }
+
+            bool lane0_occupied = isForwardLaneOccupied(sensor_fusion, car_s, 0) != -1;
+            bool lane1_occupied = isForwardLaneOccupied(sensor_fusion, car_s, 1) != -1;
+            bool lane2_occupied = isForwardLaneOccupied(sensor_fusion, car_s, 2) != -1;
+
+            bool decelerate;
+            if(lane == 0) {
+              decelerate = lane0_occupied;
+            } else if(lane == 1) {
+              decelerate = lane1_occupied;
+            } else {
+              decelerate = lane2_occupied;
+            }
+
+            State previous_state = state;
+            if(state == State::Ready) {
+              state = State::KeepLane;
+            } // State::Ready
+            else if(state == State::KeepLane) {
+              if(decelerate) {
+                if(lane == 0) {
+                  if(lane1_occupied) {
+                    state = State::KeepLane;
+                  } else {
+                    state = State::PrepareChangeRight;
+                  }
+                }
+                else if(lane == 1) {
+                  if(lane0_occupied && lane2_occupied) {
+                    state = State::KeepLane;
+                  }
+                  else if(lane0_occupied && !lane2_occupied) {
+                    state = State::PrepareChangeRight;
+                  }
+                  else if(!lane0_occupied && lane2_occupied) {
+                    state = State::PrepareChangeLeft;
+                  }
+                  else if(!lane0_occupied && !lane2_occupied) {
+                    // resolve by going to left lane
+                    state = State::PrepareChangeLeft;
+                  }
+                }
+                else if(lane == 2) {
+                  if(lane1_occupied) {
+                    state = State::KeepLane;
+                  } else {
+                    state = State::PrepareChangeLeft;
+                  }
+                }
+              } // decelerate
+              else {
+              } // !decelerate
+            } // State::KeepLane
+            else if(state == State::PrepareChangeLeft) {
+              if(lane == 1) {
+                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 0)) {
+                  state = State::ChangeLaneLeft;
+                } else {
+                  state = State::PrepareChangeLeft;
+                  decelerate = true;
+                }
+              }
+              else if(lane == 2) {
+                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 1)) {
+                  state = State::ChangeLaneLeft;
+                } else {
+                  state = State::PrepareChangeLeft;
+                  decelerate = true;
+                }
+              }
+            } // State::PrepareChangeLeft
+            else if(state == State::PrepareChangeRight) {
+              if(lane == 0) {
+                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 1)) {
+                  state = State::ChangeLaneRight;
+                } else {
+                  state = State::PrepareChangeRight;
+                }
+              }
+              else if(lane == 1) {
+                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 2)) {
+                  state = State::ChangeLaneRight;
+                } else {
+                  state = State::PrepareChangeRight;
+                }
+              }
+            } // State::PrepareChangeRight
+            else if(state == State::ChangeLaneLeft) {
+              lane -= 1;
+              state = State::KeepLane;
+            } // State::ChangeLaneLeft
+            else if(state == State::ChangeLaneRight) {
+              lane += 1;
+              state = State::KeepLane;
+            } // State::ChangeLaneRight
+
+            if(state != previous_state) {
+              if(state == State::Ready) {
+                cout << "Ready" << endl;
+              } else if(state == State::KeepLane) {
+                cout << "Keep Lane" << endl;
+              } else if(state == State::PrepareChangeRight) {
+                cout << "Prep right" << endl;
+              } else if(state == State::PrepareChangeLeft) {
+                cout << "Prep left" << endl;
+              } else if(state == State::ChangeLaneLeft) {
+                cout << "Change left" << endl;
+              } else if(state == State::ChangeLaneRight) {
+                cout << "Change right" << endl;
+              }
+            }
+            if(decelerate) {
+              ref_vel -= 0.6;
+            }
+            else if(ref_vel < 79.5) {
+              ref_vel += 0.6;
+            }
 
             vector<double> anchor_x;
             vector<double> anchor_y;
@@ -282,9 +459,8 @@ int main() {
             }
 
             // create evenly spaced points in frenet coords - every 30m
-            double lane_d = (2.0 + 4.0 * (double) lane); // center of the lane we want
             for(int i = 1; i < 4; i++) {
-              vector<double> anchor_xy = getXY(car_s + 30.0 * i, lane_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              vector<double> anchor_xy = getXY(car_s + 30.0 * i, ego_lane_center, map_waypoints_s, map_waypoints_x, map_waypoints_y);
               anchor_x.push_back(anchor_xy[0]);
               anchor_y.push_back(anchor_xy[1]);
             }
@@ -301,7 +477,7 @@ int main() {
             double target_dist = sqrt(pow(target_x, 2) + pow(target_y, 2));
             double x_point = 0.0;
             for(int i = 0; i < 50 - prev_size; i++) {
-              double N = target_dist / (0.02 * ref_vel / 3.6);
+              double N = target_dist / (0.02 * ref_vel / 3.6);  // kmh -> m/s
               x_point += target_x / N;
               double y_point = s(x_point);
 
@@ -325,6 +501,7 @@ int main() {
               next_y_vals.push_back(spline_y[i]);
             }
 
+            json msgJson;
             msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 

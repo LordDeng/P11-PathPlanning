@@ -12,7 +12,7 @@ In this project your goal is to safely navigate around a virtual highway with ot
 
 ### Path Generation
 The path is generated using the provided spline library. I use the remaining 
-states from the previous trajectory to obtain a smooth trajectory that does not violate the boundary conditions (see previous section). The actual logic is handeled by a finite state machine that is similar to the one disccused in the lecture: 
+states from the previous trajectory to obtain a smooth trajectory that does not violate the boundary conditions (see previous section). The actual logic is handeled by a finite state machine that is similar to the one disccused in the lecture (`main.cpp` line 224):
 ![alt text][image2]
 Overall, we get a nice, fast, smooth and safe driving behaviour as it can be seen in this [video](./res/Path-Planning.mp4).
 

@@ -3,6 +3,7 @@
 #include <uWS/uWS.h>
 #include <chrono>
 #include <iostream>
+#include <iomanip>
 #include <thread>
 #include <vector>
 #include "Eigen-3.3/Eigen/Core"
@@ -161,7 +162,7 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
-// returns the index (in sensor_fusion) of the occuping vehicle
+// returns the id (in sensor_fusion) of the occuping vehicle
 // -1 if no vehicle
 int isForwardLaneOccupied(const vector<vector<double>>& sensor_fusion,
                            double car_s,
@@ -175,16 +176,16 @@ int isForwardLaneOccupied(const vector<vector<double>>& sensor_fusion,
       double v_mag = sqrt(vx * vx + vy * vy);
       double check_car_s = sensor_fusion[i][5];
 
-      check_car_s += 0.02 * v_mag;
-      if(check_car_s > car_s && (check_car_s - car_s) < 20) {
-        return (int)i;
+      check_car_s += 0.1 * v_mag;
+      if(check_car_s > car_s && (check_car_s - car_s) < 18) {
+        return (int)sensor_fusion[i][0];
       }
     }
   }
   return -1;
 }
 
-// returns the index (in sensor_fusion) of the occuping vehicle
+// returns the id (in sensor_fusion) of the occuping vehicle
 // -1 if no vehicle
 int isBackwardLaneOccupied(const vector<vector<double>>& sensor_fusion,
                            double car_s,
@@ -198,14 +199,62 @@ int isBackwardLaneOccupied(const vector<vector<double>>& sensor_fusion,
       double v_mag = sqrt(vx * vx + vy * vy);
       double check_car_s = sensor_fusion[i][5];
 
-      check_car_s += 0.02 * v_mag;
-      if(check_car_s < car_s && (car_s - check_car_s) < 20) {
-        return (int)i;
+      check_car_s += 0.1 * v_mag;
+      if(check_car_s < car_s && (car_s - check_car_s) < 18) {
+        return (int)sensor_fusion[i][0];
       }
     }
   }
   return -1;
 }
+
+double getSpeedById(const vector<vector<double>>& sensor_fusion,
+                    int car_id) {
+  for(size_t i = 0; i < sensor_fusion.size(); i++) {
+    if(sensor_fusion[i][0] == car_id) {
+      double vx = sensor_fusion[i][3];
+      double vy = sensor_fusion[i][4];
+      double v_mag = sqrt(vx * vx + vy * vy);
+      return v_mag;
+    }
+  }
+  return 1000.0;
+}
+
+enum class State {
+  Ready,
+  KeepLane,
+  PrepareChangeLeft,
+  PrepareChangeRight,
+  ChangeLaneLeft,
+  ChangeLaneRight,
+};
+
+std::ostream& operator<<(std::ostream& os, const State& state)
+{
+  switch(state) {
+    case State::Ready:
+      os << "Ready             ";
+      break;
+    case State::KeepLane:
+      os << "KeepLane          ";
+      break;
+    case State::PrepareChangeLeft:
+      os << "PrepareChangeLeft ";
+      break;
+    case State::PrepareChangeRight:
+      os << "PrepareChangeRight";
+      break;
+    case State::ChangeLaneLeft:
+      os << "ChangeLaneLeft    ";
+      break;
+    case State::ChangeLaneRight:
+      os << "ChangeLaneRight   ";
+      break;
+  }
+  return os;
+}
+
 
 int main() {
   uWS::Hub h;
@@ -221,15 +270,6 @@ int main() {
   string map_file_ = "../data/highway_map.csv";
   // The max s value before wrapping around the track back to 0
   double max_s = 6945.554;
-
-  enum class State {
-    Ready,
-    KeepLane,
-    PrepareChangeLeft,
-    PrepareChangeRight,
-    ChangeLaneLeft,
-    ChangeLaneRight,
-  };
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
@@ -304,9 +344,13 @@ int main() {
               car_s = end_path_s;
             }
 
-            bool lane0_occupied = isForwardLaneOccupied(sensor_fusion, car_s, 0) != -1;
-            bool lane1_occupied = isForwardLaneOccupied(sensor_fusion, car_s, 1) != -1;
-            bool lane2_occupied = isForwardLaneOccupied(sensor_fusion, car_s, 2) != -1;
+            int lane0_next_car_id = isForwardLaneOccupied(sensor_fusion, car_s, 0);
+            int lane1_next_car_id = isForwardLaneOccupied(sensor_fusion, car_s, 1);
+            int lane2_next_car_id = isForwardLaneOccupied(sensor_fusion, car_s, 2);
+
+            bool lane0_occupied = lane0_next_car_id != -1;
+            bool lane1_occupied = lane1_next_car_id != -1;
+            bool lane2_occupied = lane2_next_car_id != -1;
 
             bool decelerate;
             if(lane == 0) {
@@ -358,32 +402,30 @@ int main() {
             } // State::KeepLane
             else if(state == State::PrepareChangeLeft) {
               if(lane == 1) {
-                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 0)) {
+                if(isBackwardLaneOccupied(sensor_fusion, car_s, 0) == -1) {
                   state = State::ChangeLaneLeft;
                 } else {
                   state = State::PrepareChangeLeft;
-                  decelerate = true;
                 }
               }
               else if(lane == 2) {
-                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 1)) {
+                if(isBackwardLaneOccupied(sensor_fusion, car_s, 1) == -1) {
                   state = State::ChangeLaneLeft;
                 } else {
                   state = State::PrepareChangeLeft;
-                  decelerate = true;
                 }
               }
             } // State::PrepareChangeLeft
             else if(state == State::PrepareChangeRight) {
               if(lane == 0) {
-                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 1)) {
+                if(isBackwardLaneOccupied(sensor_fusion, car_s, 1) == -1) {
                   state = State::ChangeLaneRight;
                 } else {
                   state = State::PrepareChangeRight;
                 }
               }
               else if(lane == 1) {
-                if(!isBackwardLaneOccupied(sensor_fusion, car_s, 2)) {
+                if(isBackwardLaneOccupied(sensor_fusion, car_s, 2) == -1) {
                   state = State::ChangeLaneRight;
                 } else {
                   state = State::PrepareChangeRight;
@@ -400,25 +442,27 @@ int main() {
             } // State::ChangeLaneRight
 
             if(state != previous_state) {
-              if(state == State::Ready) {
-                cout << "Ready" << endl;
-              } else if(state == State::KeepLane) {
-                cout << "Keep Lane" << endl;
-              } else if(state == State::PrepareChangeRight) {
-                cout << "Prep right" << endl;
-              } else if(state == State::PrepareChangeLeft) {
-                cout << "Prep left" << endl;
-              } else if(state == State::ChangeLaneLeft) {
-                cout << "Change left" << endl;
-              } else if(state == State::ChangeLaneRight) {
-                cout << "Change right" << endl;
-              }
+              cout << previous_state << " --> " << state << endl;
             }
             if(decelerate) {
               ref_vel -= 0.6;
             }
-            else if(ref_vel < 79.5) {
-              ref_vel += 0.6;
+            else {
+              double max_vel = 79.5;
+              double next_vehicle_speed;
+              if(lane == 0) {
+                next_vehicle_speed = 1.61 * getSpeedById(sensor_fusion, lane0_next_car_id);
+              }
+              else if(lane == 1) {
+                next_vehicle_speed = 1.61 * getSpeedById(sensor_fusion, lane0_next_car_id);
+              }
+              if(lane == 2) {
+                next_vehicle_speed = 1.61 * getSpeedById(sensor_fusion, lane0_next_car_id);
+              }
+              max_vel = min(max_vel, next_vehicle_speed);
+              if(ref_vel < max_vel){
+                ref_vel += 0.6;
+              }
             }
 
             vector<double> anchor_x;
